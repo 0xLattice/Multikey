@@ -46,8 +46,18 @@ public struct Multikey: Sendable, Equatable, Hashable {
         return out
     }
 
+    /// Lowercase, two digits per byte: what `String(format: "%02x")` spells.
     public var hexEncoded: String {
-        encode().map { String(format: "%02x", $0) }.joined()
+        let bytes = encode()
+        return String(unsafeUninitializedCapacity: bytes.count * 2) { buffer in
+            var index = 0
+            for byte in bytes {
+                buffer[index] = hexDigit(byte >> 4)
+                buffer[index + 1] = hexDigit(byte & 0x0f)
+                index += 2
+            }
+            return index
+        }
     }
 
     // MARK: - Decoding
@@ -109,8 +119,44 @@ private func readUvarint(_ data: Data, offset: inout Int) throws -> (UInt64, Int
 
 // MARK: - Hex helpers
 
-private extension Data {
+@inline(__always)
+private func hexDigit(_ value: UInt8) -> UInt8 {
+    value < 10 ? value &+ UInt8(ascii: "0") : value &- 10 &+ UInt8(ascii: "a")
+}
+
+@inline(__always)
+private func hexValue(_ digit: UInt8) -> UInt8? {
+    switch digit {
+    case UInt8(ascii: "0")...UInt8(ascii: "9"): digit &- UInt8(ascii: "0")
+    case UInt8(ascii: "a")...UInt8(ascii: "f"): digit &- UInt8(ascii: "a") &+ 10
+    case UInt8(ascii: "A")...UInt8(ascii: "F"): digit &- UInt8(ascii: "A") &+ 10
+    default: nil
+    }
+}
+
+extension Data {
+    /// Text of ASCII hex digits alone, after an optional `0x`, is read a byte
+    /// at a time. Anything else takes the Character-wise parse, which is what
+    /// defines the result: it counts Characters, and `UInt8(_:radix:)` also
+    /// takes a sign (`+f`, `-0`). On ASCII hex digits the two agree.
     init?(hexString: String) {
+        var digits = Substring(hexString).utf8
+        if digits.starts(with: "0x".utf8) { digits = digits.dropFirst(2) }
+        if digits.allSatisfy({ hexValue($0) != nil }) {
+            guard digits.count % 2 == 0 else { return nil }
+            var data = Data(count: digits.count / 2)
+            data.withUnsafeMutableBytes { bytes in
+                var index = digits.startIndex
+                for offset in 0..<bytes.count {
+                    let high = hexValue(digits[index])!
+                    index = digits.index(after: index)
+                    bytes[offset] = high << 4 | hexValue(digits[index])!
+                    index = digits.index(after: index)
+                }
+            }
+            self = data
+            return
+        }
         let hex = hexString.hasPrefix("0x") ? String(hexString.dropFirst(2)) : hexString
         guard hex.count % 2 == 0 else { return nil }
         var data = Data(capacity: hex.count / 2)
